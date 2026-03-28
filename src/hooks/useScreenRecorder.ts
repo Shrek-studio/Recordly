@@ -486,6 +486,11 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
       });
     }
 
+    const removeAutoStartListener = window.electronAPI?.onAutoStartRecording?.(() => {
+      console.log("[auto-record] Received start signal, toggling recording...");
+      toggleRecording();
+    });
+
     const removeRecordingStateListener = window.electronAPI?.onRecordingStateChanged?.((state) => {
       setRecording(state.recording);
     });
@@ -508,6 +513,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 
     return () => {
       cleanup?.();
+      removeAutoStartListener?.();
       removeRecordingStateListener?.();
       removeRecordingInterruptedListener?.();
 

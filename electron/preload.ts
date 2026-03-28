@@ -106,6 +106,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
 		ipcRenderer.on("stop-recording-from-tray", listener);
 		return () => ipcRenderer.removeListener("stop-recording-from-tray", listener);
 	},
+	onAutoStartRecording: (callback: () => void) => {
+		const listener = () => callback();
+		ipcRenderer.on("auto-start-recording", listener);
+		return () => ipcRenderer.removeListener("auto-start-recording", listener);
+	},
 	onRecordingStateChanged: (
 		callback: (state: { recording: boolean; sourceName: string }) => void,
 	) => {

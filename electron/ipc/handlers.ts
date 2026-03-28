@@ -4706,5 +4706,28 @@ body{background:transparent;overflow:hidden;width:100vw;height:100vh}
       seconds: countdownInProgress ? countdownRemaining : null,
     }
   })
+
+  // Auto-select the primary screen so recording works out of the box
+  if (!selectedSource) {
+    desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
+      if (selectedSource) return // user already picked one while we waited
+      const screen = getScreen()
+      const primaryDisplay = screen.getPrimaryDisplay()
+      const primarySource = sources.find(
+        (s) => String(s.display_id) === String(primaryDisplay.id)
+      ) ?? sources[0]
+      if (primarySource) {
+        selectedSource = {
+          id: primarySource.id,
+          name: 'Screen 1 (Primary)',
+          display_id: primarySource.display_id,
+          sourceType: 'screen',
+        }
+        broadcastSelectedSourceChange()
+      }
+    }).catch((error) => {
+      console.warn('Failed to auto-select primary screen:', error)
+    })
+  }
 }
 

@@ -465,4 +465,33 @@ app.whenReady().then(async () => {
 	});
 
 	createWindow();
+
+	// AUTO_RECORD_SECONDS=N  Start recording automatically, stop after N seconds
+	const autoRecordSeconds = process.env["AUTO_RECORD_SECONDS"];
+	if (autoRecordSeconds) {
+		const seconds = parseInt(autoRecordSeconds, 10) || 10;
+		console.log(`[auto-record] Will record for ${seconds}s`);
+
+		// Wait for the main window to fully load, then tell renderer to start
+		const waitForWindow = () => {
+			if (mainWindow && !mainWindow.isDestroyed()) {
+				mainWindow.webContents.once("did-finish-load", () => {
+					setTimeout(() => {
+						console.log("[auto-record] Sending start signal...");
+						mainWindow!.webContents.send("auto-start-recording");
+
+						setTimeout(() => {
+							console.log("[auto-record] Sending stop signal...");
+							if (mainWindow && !mainWindow.isDestroyed()) {
+								mainWindow.webContents.send("stop-recording-from-tray");
+							}
+						}, (seconds + 5) * 1000); // +5s for countdown
+					}, 2000); // wait 2s for UI to initialize
+				});
+			} else {
+				setTimeout(waitForWindow, 500);
+			}
+		};
+		waitForWindow();
+	}
 });
