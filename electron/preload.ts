@@ -249,6 +249,68 @@ contextBridge.exposeInMainWorld("electronAPI", {
 	openProjectsDirectory: () => {
 		return ipcRenderer.invoke("open-projects-directory");
 	},
+	installDownloadedUpdate: () => {
+		return ipcRenderer.invoke("install-downloaded-update");
+	},
+	downloadAvailableUpdate: () => {
+		return ipcRenderer.invoke("download-available-update");
+	},
+	deferDownloadedUpdate: (delayMs?: number) => {
+		return ipcRenderer.invoke("defer-downloaded-update", delayMs);
+	},
+	dismissUpdateToast: () => {
+		return ipcRenderer.invoke("dismiss-update-toast");
+	},
+	skipUpdateVersion: () => {
+		return ipcRenderer.invoke("skip-update-version");
+	},
+	getCurrentUpdateToastPayload: () => {
+		return ipcRenderer.invoke("get-current-update-toast-payload");
+	},
+	previewUpdateToast: () => {
+		return ipcRenderer.invoke("preview-update-toast");
+	},
+	onUpdateToastStateChanged: (
+		callback: (payload: {
+			version: string;
+			detail: string;
+			phase: "available" | "downloading" | "ready" | "error";
+			delayMs: number;
+			isPreview?: boolean;
+			progressPercent?: number;
+		} | null) => void,
+	) => {
+		const listener = (
+			_event: Electron.IpcRendererEvent,
+			payload:
+				| {
+						version: string;
+						detail: string;
+						phase: "available" | "downloading" | "ready" | "error";
+						delayMs: number;
+						isPreview?: boolean;
+						progressPercent?: number;
+				  }
+				| null,
+		) => callback(payload);
+		ipcRenderer.on("update-toast-state", listener);
+		return () => ipcRenderer.removeListener("update-toast-state", listener);
+	},
+	onUpdateReadyToast: (
+		callback: (payload: {
+			version: string;
+			detail: string;
+			delayMs: number;
+			isPreview?: boolean;
+		}) => void,
+	) => {
+		const listener = (
+			_event: Electron.IpcRendererEvent,
+			payload: { version: string; detail: string; delayMs: number; isPreview?: boolean },
+		) => callback(payload);
+		ipcRenderer.on("update-ready-toast", listener);
+		return () => ipcRenderer.removeListener("update-ready-toast", listener);
+	},
 	onMenuLoadProject: (callback: () => void) => {
 		const listener = () => callback();
 		ipcRenderer.on("menu-load-project", listener);

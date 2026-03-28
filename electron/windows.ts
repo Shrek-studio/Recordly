@@ -2,7 +2,8 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { app, BrowserWindow, ipcMain } from "electron";
+import { BrowserWindow, ipcMain } from "electron";
+import { USER_DATA_PATH } from "./appPaths";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const nodeRequire = createRequire(import.meta.url);
@@ -20,8 +21,9 @@ let hudOverlayWindow: BrowserWindow | null = null;
 let hudOverlayHiddenFromCapture = true;
 let hudOverlayCaptureProtectionLoaded = false;
 let countdownWindow: BrowserWindow | null = null;
+let updateToastWindow: BrowserWindow | null = null;
 
-const HUD_OVERLAY_SETTINGS_FILE = path.join(app.getPath("userData"), "hud-overlay-settings.json");
+const HUD_OVERLAY_SETTINGS_FILE = path.join(USER_DATA_PATH, "hud-overlay-settings.json");
 const HUD_BOTTOM_CLEARANCE_CM = 3.5;
 const DIP_PER_INCH = 96;
 const CM_PER_INCH = 2.54;
@@ -30,6 +32,9 @@ const HUD_SHADOW_BLEED_DIP = 36;
 const HUD_MIN_WINDOW_WIDTH = 560;
 const HUD_COMPACT_HEIGHT = 96;
 const HUD_MIN_EXPANDED_HEIGHT = 520 + HUD_SHADOW_BLEED_DIP;
+const UPDATE_TOAST_WIDTH = 420;
+const UPDATE_TOAST_HEIGHT = 212;
+const UPDATE_TOAST_GAP_DIP = 18;
 
 let hudOverlayExpanded = false;
 let hudOverlayCompactWidth = HUD_MIN_WINDOW_WIDTH;
@@ -119,10 +124,49 @@ function applyHudOverlayBounds(expanded: boolean) {
 	hudOverlayExpanded = expanded;
 
 	hudOverlayWindow.setBounds(getHudOverlayBounds(expanded), false);
+	positionUpdateToastWindow();
 	if (!hudOverlayWindow.isVisible()) {
 		return;
 	}
 	hudOverlayWindow.moveTop();
+}
+
+function getUpdateToastBounds() {
+	const hudWindow = getHudOverlayWindow();
+	if (hudWindow) {
+		const hudBounds = hudWindow.getBounds();
+		const display = getScreen().getDisplayMatching(hudBounds);
+		const x = Math.round(hudBounds.x + (hudBounds.width - UPDATE_TOAST_WIDTH) / 2);
+		const y = Math.max(
+			display.workArea.y + HUD_EDGE_MARGIN_DIP,
+			hudBounds.y - UPDATE_TOAST_HEIGHT - UPDATE_TOAST_GAP_DIP,
+		);
+
+		return {
+			x,
+			y,
+			width: UPDATE_TOAST_WIDTH,
+			height: UPDATE_TOAST_HEIGHT,
+		};
+	}
+
+	const primaryDisplay = getScreen().getPrimaryDisplay();
+	const { workArea } = primaryDisplay;
+	return {
+		x: Math.round(workArea.x + (workArea.width - UPDATE_TOAST_WIDTH) / 2),
+		y: workArea.y + HUD_EDGE_MARGIN_DIP,
+		width: UPDATE_TOAST_WIDTH,
+		height: UPDATE_TOAST_HEIGHT,
+	};
+}
+
+function positionUpdateToastWindow() {
+	if (!updateToastWindow || updateToastWindow.isDestroyed()) {
+		return;
+	}
+
+	updateToastWindow.setBounds(getUpdateToastBounds(), false);
+	updateToastWindow.moveTop();
 }
 
 ipcMain.on("hud-overlay-hide", () => {
@@ -273,13 +317,97 @@ export function createHudOverlayWindow(): BrowserWindow {
 	return win;
 }
 
-export function createEditorWindow(): BrowserWindow {
-	const isMac = process.platform === "darwin";
-	const { width, height } = getScreen().getPrimaryDisplay().workAreaSize;
+export function getHudOverlayWindow(): BrowserWindow | null {
+	return hudOverlayWindow && !hudOverlayWindow.isDestroyed() ? hudOverlayWindow : null;
+}
+
+export function createUpdateToastWindow(): BrowserWindow {
+	const initialBounds = getUpdateToastBounds();
 
 	const win = new BrowserWindow({
-		width: Math.round(width * 0.85),
-		height: Math.round(height * 0.85),
+		width: initialBounds.width,
+		height: initialBounds.height,
+		x: initialBounds.x,
+		y: initialBounds.y,
+		frame: false,
+		transparent: true,
+		resizable: false,
+		alwaysOnTop: true,
+		skipTaskbar: true,
+		hasShadow: false,
+		show: false,
+		focusable: true,
+		...(hudOverlayWindow && !hudOverlayWindow.isDestroyed() ? { parent: hudOverlayWindow } : {}),
+		backgroundColor: "#00000000",
+		webPreferences: {
+			preload: path.join(__dirname, "preload.mjs"),
+			nodeIntegration: false,
+			contextIsolation: true,
+			backgroundThrottling: false,
+		},
+	});
+
+	if (process.platform === "darwin") {
+		win.setAlwaysOnTop(true, "status");
+	}
+
+	win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+	updateToastWindow = win;
+
+	win.on("closed", () => {
+		if (updateToastWindow === win) {
+			updateToastWindow = null;
+		}
+	});
+
+	if (VITE_DEV_SERVER_URL) {
+		win.loadURL(VITE_DEV_SERVER_URL + "?windowType=update-toast");
+	} else {
+		win.loadFile(path.join(RENDERER_DIST, "index.html"), {
+			query: { windowType: "update-toast" },
+		});
+	}
+
+	return win;
+}
+
+export function getUpdateToastWindow(): BrowserWindow | null {
+	return updateToastWindow && !updateToastWindow.isDestroyed() ? updateToastWindow : null;
+}
+
+export function showUpdateToastWindow(): BrowserWindow {
+	const win = getUpdateToastWindow() ?? createUpdateToastWindow();
+	positionUpdateToastWindow();
+	if (!win.isVisible()) {
+		win.showInactive();
+	} else {
+		win.moveTop();
+	}
+
+	return win;
+}
+
+export function hideUpdateToastWindow(): void {
+	if (!updateToastWindow || updateToastWindow.isDestroyed()) {
+		return;
+	}
+
+	updateToastWindow.hide();
+}
+
+export function createEditorWindow(): BrowserWindow {
+	const isMac = process.platform === "darwin";
+	const { workArea, workAreaSize } = getScreen().getPrimaryDisplay();
+	const initialWidth = isMac ? Math.round(workAreaSize.width * 0.85) : workArea.width;
+	const initialHeight = isMac ? Math.round(workAreaSize.height * 0.85) : workArea.height;
+
+	const win = new BrowserWindow({
+		width: initialWidth,
+		height: initialHeight,
+		...(!isMac && {
+			x: workArea.x,
+			y: workArea.y,
+		}),
 		minWidth: 800,
 		minHeight: 600,
 		...(process.platform !== "darwin" && {
@@ -289,6 +417,7 @@ export function createEditorWindow(): BrowserWindow {
 			titleBarStyle: "hiddenInset",
 			trafficLightPosition: { x: 12, y: 12 },
 		}),
+		autoHideMenuBar: !isMac,
 		transparent: false,
 		resizable: true,
 		alwaysOnTop: false,

@@ -13,28 +13,39 @@ import {
 	systemPreferences,
 	Tray,
 } from "electron";
+import { RECORDINGS_DIR } from "./appPaths";
 import { showCursor } from "./cursorHider";
 import {
 	getSelectedSourceId,
 	killWindowsCaptureProcess,
 	registerIpcHandlers,
 } from "./ipc/handlers";
-import { checkForAppUpdates, setupAutoUpdates } from "./updater";
-import { createEditorWindow, createHudOverlayWindow, createSourceSelectorWindow } from "./windows";
+import {
+	checkForAppUpdates,
+	dismissUpdateToast,
+	downloadAvailableUpdate,
+	deferUpdateReminder,
+	getCurrentUpdateToastPayload,
+	installDownloadedUpdateNow,
+	previewUpdateToast,
+	skipAvailableUpdateVersion,
+	setupAutoUpdates,
+} from "./updater";
+import {
+	createEditorWindow,
+	createHudOverlayWindow,
+	createSourceSelectorWindow,
+	getUpdateToastWindow,
+	getHudOverlayWindow,
+	hideUpdateToastWindow,
+	showUpdateToastWindow,
+} from "./windows";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-if (process.env["VITE_DEV_SERVER_URL"]) {
-	const devUserDataPath = path.join(app.getPath("appData"), "Recordly-dev");
-	app.setPath("userData", devUserDataPath);
-	app.setPath("sessionData", path.join(devUserDataPath, "session"));
-}
 
 if (process.platform === "darwin") {
 	app.commandLine.appendSwitch("disable-features", "MacCatapLoopbackAudioForScreenShare");
 }
-
-export const RECORDINGS_DIR = path.join(app.getPath("userData"), "recordings");
 
 async function ensureRecordingsDir() {
 	try {
@@ -98,10 +109,26 @@ ipcMain.on("set-has-unsaved-changes", (_event, hasChanges: boolean) => {
 });
 
 function createWindow() {
+	if (!app.isReady()) {
+		void app.whenReady().then(() => {
+			if (!mainWindow || mainWindow.isDestroyed()) {
+				createWindow();
+			}
+		});
+		return;
+	}
+
 	mainWindow = createHudOverlayWindow();
 }
 
 function focusOrCreateMainWindow() {
+	if (!app.isReady()) {
+		void app.whenReady().then(() => {
+			focusOrCreateMainWindow();
+		});
+		return;
+	}
+
 	if (BrowserWindow.getAllWindows().length === 0) {
 		createWindow();
 		return;
@@ -152,24 +179,26 @@ function sendEditorMenuAction(
 
 function setupApplicationMenu() {
 	const isMac = process.platform === "darwin";
-	const template: Electron.MenuItemConstructorOptions[] = [];
-
-	if (isMac) {
-		template.push({
-			label: app.name,
-			submenu: [
-				{ role: "about" },
-				{ type: "separator" },
-				{ role: "services" },
-				{ type: "separator" },
-				{ role: "hide" },
-				{ role: "hideOthers" },
-				{ role: "unhide" },
-				{ type: "separator" },
-				{ role: "quit" },
-			],
-		});
+	if (!isMac) {
+		Menu.setApplicationMenu(null);
+		return;
 	}
+
+	const template: Electron.MenuItemConstructorOptions[] = [];
+	template.push({
+		label: app.name,
+		submenu: [
+			{ role: "about" },
+			{ type: "separator" },
+			{ role: "services" },
+			{ type: "separator" },
+			{ role: "hide" },
+			{ role: "hideOthers" },
+			{ role: "unhide" },
+			{ type: "separator" },
+			{ role: "quit" },
+		],
+	});
 
 	template.push(
 		{
@@ -231,7 +260,7 @@ function setupApplicationMenu() {
 				{
 					label: "Check for Updates…",
 					click: () => {
-						void checkForAppUpdates(() => mainWindow, { manual: true });
+						void checkForAppUpdates(getUpdateDialogWindow, { manual: true });
 					},
 				},
 			],
@@ -273,6 +302,75 @@ function syncDockIcon() {
 		app.dock.setIcon(dockIcon);
 	}
 }
+
+function sendUpdateToastToWindows(channel: "update-toast-state", payload: unknown) {
+	if (!payload) {
+		const existingWindow = getUpdateToastWindow();
+		if (!existingWindow) {
+			return false;
+		}
+
+		existingWindow.webContents.send(channel, null);
+		hideUpdateToastWindow();
+		return true;
+	}
+
+	const toastWindow = showUpdateToastWindow();
+	const sendPayload = () => {
+		toastWindow.webContents.send(channel, payload);
+		showUpdateToastWindow();
+	};
+
+	if (toastWindow.webContents.isLoadingMainFrame()) {
+		toastWindow.webContents.once("did-finish-load", sendPayload);
+	} else {
+		sendPayload();
+	}
+
+	return true;
+}
+
+function getUpdateDialogWindow() {
+	const focusedWindow = BrowserWindow.getFocusedWindow();
+	if (focusedWindow && !focusedWindow.isDestroyed()) {
+		return focusedWindow;
+	}
+
+	if (mainWindow && !mainWindow.isDestroyed()) {
+		return mainWindow;
+	}
+
+	return getHudOverlayWindow();
+}
+
+ipcMain.handle("install-downloaded-update", () => {
+	installDownloadedUpdateNow(sendUpdateToastToWindows);
+	return { success: true };
+});
+
+ipcMain.handle("download-available-update", () => {
+	return downloadAvailableUpdate(sendUpdateToastToWindows);
+});
+
+ipcMain.handle("defer-downloaded-update", (_event, delayMs?: number) => {
+	return deferUpdateReminder(getUpdateDialogWindow, sendUpdateToastToWindows, delayMs);
+});
+
+ipcMain.handle("dismiss-update-toast", () => {
+	return dismissUpdateToast(getUpdateDialogWindow, sendUpdateToastToWindows);
+});
+
+ipcMain.handle("skip-update-version", () => {
+	return skipAvailableUpdateVersion(sendUpdateToastToWindows);
+});
+
+ipcMain.handle("get-current-update-toast-payload", () => {
+	return getCurrentUpdateToastPayload();
+});
+
+ipcMain.handle("preview-update-toast", () => {
+	return { success: previewUpdateToast(sendUpdateToastToWindows) };
+});
 
 function updateTrayMenu(recording: boolean = false) {
 	if (!tray) return;
@@ -436,7 +534,8 @@ app.whenReady().then(async () => {
 		},
 	);
 
-	setupAutoUpdates(() => mainWindow);
+	createWindow();
+	setupAutoUpdates(getUpdateDialogWindow, sendUpdateToastToWindows);
 
 	// Register the display media handler so that renderer's getDisplayMedia()
 	// calls land on the pre-selected source without showing a system picker.
@@ -464,34 +563,8 @@ app.whenReady().then(async () => {
 		}
 	});
 
-	createWindow();
-
-	// AUTO_RECORD_SECONDS=N  Start recording automatically, stop after N seconds
-	const autoRecordSeconds = process.env["AUTO_RECORD_SECONDS"];
-	if (autoRecordSeconds) {
-		const seconds = parseInt(autoRecordSeconds, 10) || 10;
-		console.log(`[auto-record] Will record for ${seconds}s`);
-
-		// Wait for the main window to fully load, then tell renderer to start
-		const waitForWindow = () => {
-			if (mainWindow && !mainWindow.isDestroyed()) {
-				mainWindow.webContents.once("did-finish-load", () => {
-					setTimeout(() => {
-						console.log("[auto-record] Sending start signal...");
-						mainWindow!.webContents.send("auto-start-recording");
-
-						setTimeout(() => {
-							console.log("[auto-record] Sending stop signal...");
-							if (mainWindow && !mainWindow.isDestroyed()) {
-								mainWindow.webContents.send("stop-recording-from-tray");
-							}
-						}, (seconds + 5) * 1000); // +5s for countdown
-					}, 2000); // wait 2s for UI to initialize
-				});
-			} else {
-				setTimeout(waitForWindow, 500);
-			}
-		};
-		waitForWindow();
+	const currentToastPayload = getCurrentUpdateToastPayload();
+	if (currentToastPayload) {
+		sendUpdateToastToWindows("update-toast-state", currentToastPayload);
 	}
 });

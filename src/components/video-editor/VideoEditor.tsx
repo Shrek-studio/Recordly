@@ -4,7 +4,6 @@ import {
 	Captions,
 	Download,
 	FolderOpen,
-	Languages,
 	MousePointer2,
 	Redo2,
 	Save,
@@ -62,13 +61,12 @@ import {
 } from "./projectPersistence";
 import { type EditorEffectSection, SettingsPanel } from "./SettingsPanel";
 import {
-	APP_HEADER_ACTION_BUTTON_CLASS,
+	APP_HEADER_ICON_BUTTON_CLASS,
 	FeedbackDialog,
 	KeyboardShortcutsDialog,
 } from "./TutorialHelp";
 import TimelineEditor from "./timeline/TimelineEditor";
 import {
-	detectInteractionCandidates,
 	normalizeCursorTelemetry,
 } from "./timeline/zoomSuggestionUtils";
 import {
@@ -289,18 +287,20 @@ function LanguageSwitcher() {
 			variant="ghost"
 			size="sm"
 			onClick={() => setLocale(next)}
-			className={APP_HEADER_ACTION_BUTTON_CLASS}
+			className="h-7 rounded-[5px] px-2 text-[11px] font-semibold leading-none text-slate-300 hover:bg-white/10 hover:text-white transition-all"
 			title={t("common.app.language", "Language")}
 			aria-label={t("common.app.language", "Language")}
 		>
-			<Languages className="h-4 w-4" />
-			<span className="font-medium">{labels[locale] ?? locale.toUpperCase()}</span>
+			<span className="leading-none">{labels[locale] ?? locale.toUpperCase()}</span>
 		</Button>
 	);
 }
 
 export default function VideoEditor() {
 	const { t } = useI18n();
+	const [appPlatform, setAppPlatform] = useState<string>(
+		typeof navigator !== "undefined" && /Mac/i.test(navigator.platform) ? "darwin" : "",
+	);
 	const initialEditorPreferences = useMemo(() => loadEditorPreferences(), []);
 	const [videoPath, setVideoPath] = useState<string | null>(null);
 	const [videoSourcePath, setVideoSourcePath] = useState<string | null>(null);
@@ -416,6 +416,9 @@ export default function VideoEditor() {
 	const [lastSavedSnapshot, setLastSavedSnapshot] = useState<EditorProjectData | null>(null);
 	const [showCropModal, setShowCropModal] = useState(false);
 	const [previewVersion, setPreviewVersion] = useState(0);
+	const [isPreviewReady, setIsPreviewReady] = useState(false);
+	const [autoSuggestZoomsTrigger, setAutoSuggestZoomsTrigger] = useState(0);
+	const headerLeftControlsPaddingClass = appPlatform === "darwin" ? "pl-[76px]" : "";
 
 	const videoPlaybackRef = useRef<VideoPlaybackRef>(null);
 	const projectBrowserTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -430,14 +433,22 @@ export default function VideoEditor() {
 	const nextAnnotationZIndexRef = useRef(1); // Track z-index for stacking order
 	const exporterRef = useRef<VideoExporter | null>(null);
 	const autoSuggestedVideoPathRef = useRef<string | null>(null);
+	const pendingFreshRecordingAutoZoomPathRef = useRef<string | null>(null);
 	const historyPastRef = useRef<EditorHistorySnapshot[]>([]);
 	const historyFutureRef = useRef<EditorHistorySnapshot[]>([]);
 	const historyCurrentRef = useRef<EditorHistorySnapshot | null>(null);
 	const applyingHistoryRef = useRef(false);
 	const pendingExportSaveRef = useRef<PendingExportSave | null>(null);
+	const pendingTelemetryRetryTimeoutRef = useRef<number | null>(null);
 	const cropSnapshotRef = useRef<CropRegion | null>(null);
 	const mp4SupportRequestRef = useRef(0);
 	const [historyVersion, setHistoryVersion] = useState(0);
+
+	useEffect(() => {
+		void window.electronAPI.getPlatform().then((platform) => {
+			setAppPlatform(platform);
+		});
+	}, []);
 	const [supportedMp4SourceDimensions, setSupportedMp4SourceDimensions] =
 		useState<SupportedMp4Dimensions>({
 			width: 1920,
@@ -642,11 +653,20 @@ export default function VideoEditor() {
 		}));
 	}, []);
 
+	const remountPreview = useCallback(() => {
+		setIsPreviewReady(false);
+		setPreviewVersion((version) => version + 1);
+	}, []);
+
 	useEffect(() => {
 		return () => {
 			exporterRef.current?.cancel();
 			exporterRef.current = null;
 			pendingExportSaveRef.current = null;
+			if (pendingTelemetryRetryTimeoutRef.current !== null) {
+				window.clearTimeout(pendingTelemetryRetryTimeoutRef.current);
+				pendingTelemetryRetryTimeoutRef.current = null;
+			}
 		};
 	}, []);
 
@@ -1071,6 +1091,7 @@ export default function VideoEditor() {
 			setVideoSourcePath(sourcePath);
 			setVideoPath(toFileUrl(sourcePath));
 			setCurrentProjectPath(path ?? null);
+			pendingFreshRecordingAutoZoomPathRef.current = null;
 			if (normalizedEditor.webcam.sourcePath) {
 				await window.electronAPI.setCurrentRecordingSession?.({
 					videoPath: sourcePath,
@@ -1287,10 +1308,12 @@ export default function VideoEditor() {
 				const sessionResult = await window.electronAPI.getCurrentRecordingSession?.();
 				if (sessionResult?.success && sessionResult.session?.videoPath) {
 					const sourcePath = fromFileUrl(sessionResult.session.videoPath);
+					const sourceVideoUrl = toFileUrl(sourcePath);
 					setVideoSourcePath(sourcePath);
-					setVideoPath(toFileUrl(sourcePath));
+					setVideoPath(sourceVideoUrl);
 					setCurrentProjectPath(null);
 					setLastSavedSnapshot(null);
+					pendingFreshRecordingAutoZoomPathRef.current = sourceVideoUrl;
 					setWebcam((prev) => ({
 						...prev,
 						enabled: Boolean(sessionResult.session?.webcamPath),
@@ -1302,10 +1325,12 @@ export default function VideoEditor() {
 				const result = await window.electronAPI.getCurrentVideoPath();
 				if (result.success && result.path) {
 					const sourcePath = fromFileUrl(result.path);
+					const sourceVideoUrl = toFileUrl(sourcePath);
 					setVideoSourcePath(sourcePath);
-					setVideoPath(toFileUrl(sourcePath));
+					setVideoPath(sourceVideoUrl);
 					setCurrentProjectPath(null);
 					setLastSavedSnapshot(null);
+					pendingFreshRecordingAutoZoomPathRef.current = sourceVideoUrl;
 					setWebcam((prev) => ({
 						...prev,
 						enabled: false,
@@ -1576,53 +1601,57 @@ export default function VideoEditor() {
 				return false;
 			}
 
-			const projectData =
-				currentProjectSnapshot?.videoPath === currentSourcePath
-					? currentProjectSnapshot
-					: createProjectData(currentSourcePath, currentPersistedEditorState);
+			try {
+				const projectData =
+					currentProjectSnapshot?.videoPath === currentSourcePath
+						? currentProjectSnapshot
+						: createProjectData(currentSourcePath, currentPersistedEditorState);
 
-			const fileNameBase =
-				currentSourcePath
-					.split(/[\\/]/)
-					.pop()
-					?.replace(/\.[^.]+$/, "") || `project-${Date.now()}`;
-			let targetProjectPath = forceSaveAs ? undefined : (currentProjectPath ?? undefined);
+				const fileNameBase =
+					currentSourcePath
+						.split(/[\\/]/)
+						.pop()
+						?.replace(/\.[^.]+$/, "") || `project-${Date.now()}`;
+				let targetProjectPath = forceSaveAs ? undefined : (currentProjectPath ?? undefined);
 
-			if (!forceSaveAs && !targetProjectPath) {
-				const activeProjectResult = await window.electronAPI.loadCurrentProjectFile();
-				if (activeProjectResult.success && activeProjectResult.path) {
-					targetProjectPath = activeProjectResult.path;
-					setCurrentProjectPath(activeProjectResult.path);
+				if (!forceSaveAs && !targetProjectPath) {
+					const activeProjectResult = await window.electronAPI.loadCurrentProjectFile();
+					if (activeProjectResult.success && activeProjectResult.path) {
+						targetProjectPath = activeProjectResult.path;
+						setCurrentProjectPath(activeProjectResult.path);
+					}
 				}
+
+				const thumbnailDataUrl = await captureProjectThumbnail();
+
+				const result = await window.electronAPI.saveProjectFile(
+					projectData,
+					fileNameBase,
+					targetProjectPath,
+					thumbnailDataUrl,
+				);
+
+				if (result.canceled) {
+					toast.info("Project save canceled");
+					return false;
+				}
+
+				if (!result.success) {
+					toast.error(result.message || "Failed to save project");
+					return false;
+				}
+
+				if (result.path) {
+					setCurrentProjectPath(result.path);
+				}
+				setLastSavedSnapshot(cloneStructured(projectData));
+				await refreshProjectLibrary();
+
+				toast.success(`Project saved to ${result.path}`);
+				return true;
+			} finally {
+				remountPreview();
 			}
-
-			const thumbnailDataUrl = await captureProjectThumbnail();
-
-			const result = await window.electronAPI.saveProjectFile(
-				projectData,
-				fileNameBase,
-				targetProjectPath,
-				thumbnailDataUrl,
-			);
-
-			if (result.canceled) {
-				toast.info("Project save canceled");
-				return false;
-			}
-
-			if (!result.success) {
-				toast.error(result.message || "Failed to save project");
-				return false;
-			}
-
-			if (result.path) {
-				setCurrentProjectPath(result.path);
-			}
-			setLastSavedSnapshot(cloneStructured(projectData));
-			await refreshProjectLibrary();
-
-			toast.success(`Project saved to ${result.path}`);
-			return true;
 		},
 		[
 			captureProjectThumbnail,
@@ -1631,6 +1660,7 @@ export default function VideoEditor() {
 			currentProjectSnapshot,
 			currentPersistedEditorState,
 			refreshProjectLibrary,
+			remountPreview,
 		],
 	);
 
@@ -1709,6 +1739,7 @@ export default function VideoEditor() {
 
 	useEffect(() => {
 		let mounted = true;
+		let retryAttempts = 0;
 
 		async function loadCursorTelemetry() {
 			if (!videoPath) {
@@ -1721,20 +1752,57 @@ export default function VideoEditor() {
 			try {
 				const result = await window.electronAPI.getCursorTelemetry(fromFileUrl(videoPath));
 				if (mounted) {
-					setCursorTelemetry(result.success ? result.samples : []);
+					const samples = result.success ? result.samples : [];
+					setCursorTelemetry(samples);
+
+					const shouldRetryFreshRecordingTelemetry =
+						samples.length < 2 &&
+						pendingFreshRecordingAutoZoomPathRef.current === videoPath &&
+						retryAttempts < 12;
+
+					if (shouldRetryFreshRecordingTelemetry) {
+						retryAttempts += 1;
+						pendingTelemetryRetryTimeoutRef.current = window.setTimeout(() => {
+							pendingTelemetryRetryTimeoutRef.current = null;
+							if (mounted) {
+								void loadCursorTelemetry();
+							}
+						}, 350);
+					}
 				}
 			} catch (telemetryError) {
 				console.warn("Unable to load cursor telemetry:", telemetryError);
 				if (mounted) {
 					setCursorTelemetry([]);
+					if (
+						pendingFreshRecordingAutoZoomPathRef.current === videoPath &&
+						retryAttempts < 12
+					) {
+						retryAttempts += 1;
+						pendingTelemetryRetryTimeoutRef.current = window.setTimeout(() => {
+							pendingTelemetryRetryTimeoutRef.current = null;
+							if (mounted) {
+								void loadCursorTelemetry();
+							}
+						}, 350);
+					}
 				}
 			}
+		}
+
+		if (pendingTelemetryRetryTimeoutRef.current !== null) {
+			window.clearTimeout(pendingTelemetryRetryTimeoutRef.current);
+			pendingTelemetryRetryTimeoutRef.current = null;
 		}
 
 		loadCursorTelemetry();
 
 		return () => {
 			mounted = false;
+			if (pendingTelemetryRetryTimeoutRef.current !== null) {
+				window.clearTimeout(pendingTelemetryRetryTimeoutRef.current);
+				pendingTelemetryRetryTimeoutRef.current = null;
+			}
 		};
 	}, [videoPath]);
 
@@ -1777,84 +1845,31 @@ export default function VideoEditor() {
 	const effectiveZoomRegions = zoomRegions;
 
 	useEffect(() => {
-		const suggestionTelemetry = effectiveCursorTelemetry;
 		if (
 			!videoPath ||
+			loading ||
+			!isPreviewReady ||
 			duration <= 0 ||
 			loopCursor ||
 			zoomRegions.length > 0 ||
-			suggestionTelemetry.length < 2
+			effectiveCursorTelemetry.length < 2
 		) {
 			return;
 		}
 
+		if (pendingFreshRecordingAutoZoomPathRef.current !== videoPath) {
+			return;
+		}
+
 		if (autoSuggestedVideoPathRef.current === videoPath) {
+			pendingFreshRecordingAutoZoomPathRef.current = null;
 			return;
 		}
-
-		const totalMs = Math.max(0, Math.round(duration * 1000));
-		if (totalMs <= 0) {
-			return;
-		}
-
-		const candidates = detectInteractionCandidates(suggestionTelemetry);
-		if (candidates.length === 0) {
-			autoSuggestedVideoPathRef.current = videoPath;
-			return;
-		}
-
-		const DEFAULT_DURATION_MS = 1100;
-		const MIN_SPACING_MS = 1800;
-		const sortedCandidates = [...candidates].sort((a, b) => b.strength - a.strength);
-		const acceptedCenters: number[] = [];
-
-		setZoomRegions((prev) => {
-			if (prev.length > 0) {
-				return prev;
-			}
-
-			const reservedSpans: Array<{ start: number; end: number }> = [];
-			const additions: ZoomRegion[] = [];
-			let nextId = nextZoomIdRef.current;
-
-			sortedCandidates.forEach((candidate) => {
-				const tooCloseToAccepted = acceptedCenters.some(
-					(center) => Math.abs(center - candidate.centerTimeMs) < MIN_SPACING_MS,
-				);
-				if (tooCloseToAccepted) {
-					return;
-				}
-
-				const centeredStart = Math.round(candidate.centerTimeMs - DEFAULT_DURATION_MS / 2);
-				const startMs = Math.max(0, Math.min(centeredStart, totalMs - DEFAULT_DURATION_MS));
-				const endMs = Math.min(totalMs, startMs + DEFAULT_DURATION_MS);
-
-				const hasOverlap = reservedSpans.some((span) => endMs > span.start && startMs < span.end);
-				if (hasOverlap) {
-					return;
-				}
-
-				additions.push({
-					id: `zoom-${nextId++}`,
-					startMs,
-					endMs,
-					depth: DEFAULT_ZOOM_DEPTH,
-					focus: clampFocusToDepth(candidate.focus, DEFAULT_ZOOM_DEPTH),
-				});
-				reservedSpans.push({ start: startMs, end: endMs });
-				acceptedCenters.push(candidate.centerTimeMs);
-			});
-
-			if (additions.length === 0) {
-				return prev;
-			}
-
-			nextZoomIdRef.current = nextId;
-			return [...prev, ...additions];
-		});
 
 		autoSuggestedVideoPathRef.current = videoPath;
-	}, [videoPath, duration, effectiveCursorTelemetry, loopCursor, zoomRegions.length]);
+		pendingFreshRecordingAutoZoomPathRef.current = null;
+		setAutoSuggestZoomsTrigger((value) => value + 1);
+	}, [videoPath, loading, isPreviewReady, duration, effectiveCursorTelemetry.length, loopCursor, zoomRegions.length]);
 
 	function togglePlayPause() {
 		const playback = videoPlaybackRef.current;
@@ -2677,7 +2692,7 @@ export default function VideoEditor() {
 				exporterRef.current = null;
 				setShowExportDropdown(keepExportDialogOpen);
 				setExportProgress(null);
-				setPreviewVersion((version) => version + 1);
+				remountPreview();
 			}
 		},
 		[
@@ -2720,6 +2735,7 @@ export default function VideoEditor() {
 			effectiveZoomRegions,
 			ensureSupportedMp4SourceDimensions,
 			markExportAsSaving,
+			remountPreview,
 			showExportSuccessToast,
 		],
 	);
@@ -2939,17 +2955,11 @@ export default function VideoEditor() {
 	return (
 		<div className="flex flex-col h-screen bg-[#111113] text-slate-200 overflow-hidden selection:bg-[#2563EB]/30">
 			<div
-				className="relative h-11 flex-shrink-0 bg-[#151518]/88 backdrop-blur-md border-b border-white/10 flex items-center justify-center px-8 z-50"
+				className="relative flex h-11 flex-shrink-0 items-center justify-between bg-[#151518]/88 px-5 backdrop-blur-md border-b border-white/10 z-50"
 				style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
 			>
-				<div className="flex items-baseline gap-0">
-					<span className="text-sm font-semibold tracking-tight text-white/90">
-						{projectDisplayName}
-					</span>
-					<span className="text-xs font-medium tracking-tight text-slate-500">.recordly</span>
-				</div>
 				<div
-					className="absolute left-[88px] flex items-center gap-2"
+					className={`flex items-center gap-1.5 justify-self-start ${headerLeftControlsPaddingClass}`}
 					style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
 				>
 					<LanguageSwitcher />
@@ -2958,7 +2968,7 @@ export default function VideoEditor() {
 						variant="ghost"
 						size="sm"
 						onClick={() => void openRecordingsFolder()}
-						className={`${APP_HEADER_ACTION_BUTTON_CLASS} px-2.5`}
+						className={APP_HEADER_ICON_BUTTON_CLASS}
 						title={t("common.app.manageRecordings", "Open recordings folder")}
 						aria-label={t("common.app.manageRecordings", "Open recordings folder")}
 					>
@@ -2967,11 +2977,6 @@ export default function VideoEditor() {
 					<KeyboardShortcutsDialog />
 					<FeedbackDialog />
 					<div className="ml-1 h-5 w-px bg-white/10" />
-				</div>
-				<div
-					className="absolute right-5 flex items-center gap-2 pr-3"
-					style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
-				>
 					<Button
 						type="button"
 						variant="ghost"
@@ -2994,7 +2999,20 @@ export default function VideoEditor() {
 					>
 						<Redo2 className="h-4 w-4" />
 					</Button>
-					<div className="mx-1 h-5 w-px bg-white/10" />
+				</div>
+				<div
+					className="pointer-events-none absolute left-1/2 flex min-w-0 -translate-x-1/2 items-baseline justify-center gap-0"
+					style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+				>
+					<span className="text-sm font-semibold tracking-tight text-white/90">
+						{projectDisplayName}
+					</span>
+					<span className="text-xs font-medium tracking-tight text-slate-500">.recordly</span>
+				</div>
+				<div
+					className="flex items-center gap-2 justify-self-end pr-3"
+					style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+				>
 					<Button
 						ref={projectBrowserTriggerRef}
 						type="button"
@@ -3235,6 +3253,7 @@ export default function VideoEditor() {
 												ref={videoPlaybackRef}
 												videoPath={videoPath || ""}
 												onDurationChange={setDuration}
+												onPreviewReadyChange={setIsPreviewReady}
 												onTimeUpdate={setCurrentTime}
 												currentTime={currentTime}
 												onPlayStateChange={setIsPlaying}
@@ -3323,6 +3342,7 @@ export default function VideoEditor() {
 									currentTime={currentTime}
 									onSeek={handleSeek}
 									cursorTelemetry={normalizedCursorTelemetry}
+									autoSuggestZoomsTrigger={autoSuggestZoomsTrigger}
 									zoomRegions={effectiveZoomRegions}
 									onZoomAdded={handleZoomAdded}
 									onZoomSuggested={handleZoomSuggested}
