@@ -257,6 +257,23 @@ Inside the editor you can:
 
 Save your work anytime as a `.recordly` project.
 
+## Auto-record (headless / CI)
+
+You can start and stop a recording automatically without any clicks by setting the `AUTO_RECORD_SECONDS` environment variable:
+
+```bash
+AUTO_RECORD_SECONDS=30 npm run dev
+```
+
+This will:
+
+1. Launch Recordly in dev mode
+2. Auto-select the primary screen
+3. Start recording after the UI initializes
+4. Stop recording after 30 seconds (plus the countdown)
+
+The resulting recording is saved to the default Recordly recordings folder and can be opened as a `.recordly` project for editing.
+
 ## Export
 
 Export options include:
